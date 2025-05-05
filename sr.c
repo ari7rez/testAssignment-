@@ -1,3 +1,4 @@
+// sr.c
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdbool.h>
@@ -60,13 +61,6 @@ static struct pkt buffer[WINDOWSIZE]; /* array for storing packets waiting for A
 static int windowfirst, windowlast;   /* array indexes of the first/last packet awaiting ACK */
 static int windowcount;               /* the number of packets currently awaiting an ACK */
 static int A_nextseqnum;              /* the next sequence number to be used by the sender */
-static bool acks_received[SEQSPACE];
-static bool timer_running[SEQSPACE];
-
-static struct pkt receiver_buffer[SEQSPACE];
-static bool received[SEQSPACE];
-static int expected_seqnum = 0;
-static bool acked[SEQSPACE]; /* ACK tracking for SR */
 
 /* called from layer 5 (application layer), passed the message to be sent to other side */
 void A_output(struct msg message)
@@ -92,7 +86,6 @@ void A_output(struct msg message)
     windowlast = (windowlast + 1) % WINDOWSIZE;
     buffer[windowlast] = sendpkt;
     windowcount++;
-    acked[sendpkt.seqnum] = false;
 
     /* send out packet */
     if (TRACE > 0)
@@ -145,18 +138,20 @@ void A_input(struct pkt packet)
           printf("----A: ACK %d is not a duplicate\n", packet.acknum);
         new_ACKs++;
 
-        /* mark this packet slot as acknowledged */
-        acked[packet.acknum] = 1;
+        /* cumulative acknowledgement - determine how many packets are ACKed */
+        if (packet.acknum >= seqfirst)
+          ackcount = packet.acknum + 1 - seqfirst;
+        else
+          ackcount = SEQSPACE - seqfirst + packet.acknum;
 
-        /* slide window if front packets are acked */
-        while (windowcount > 0 && acked[buffer[windowfirst].seqnum])
-        {
-          acked[buffer[windowfirst].seqnum] = 0;
-          windowfirst = (windowfirst + 1) % WINDOWSIZE;
+        /* slide window by the number of packets ACKed */
+        windowfirst = (windowfirst + ackcount) % WINDOWSIZE;
+
+        /* delete the acked packets from window buffer */
+        for (i = 0; i < ackcount; i++)
           windowcount--;
-        }
 
-        /* restart timer if still have unacked packets */
+        /* start timer again if there are still more unacked packets in window */
         stoptimer(A);
         if (windowcount > 0)
           starttimer(A, RTT);
@@ -176,20 +171,15 @@ void A_timerinterrupt(void)
 
   if (TRACE > 0)
     printf("----A: time out,resend packets!\n");
+
   for (i = 0; i < windowcount; i++)
   {
-    int index = (windowfirst + i) % WINDOWSIZE;
-    int seq = buffer[index].seqnum;
 
-    if (!acked[seq])
-    {
-      if (TRACE > 0)
-        printf("---A: resending packet %d\n", (buffer[(windowfirst + i) % WINDOWSIZE]).seqnum);
+    if (TRACE > 0)
+      printf("---A: resending packet %d\n", (buffer[(windowfirst + i) % WINDOWSIZE]).seqnum);
 
-      tolayer3(A, buffer[index]);
-      packets_resent++;
-    }
-
+    tolayer3(A, buffer[(windowfirst + i) % WINDOWSIZE]);
+    packets_resent++;
     if (i == 0)
       starttimer(A, RTT);
   }
@@ -202,14 +192,11 @@ void A_init(void)
   /* initialise A's window, buffer and sequence number */
   A_nextseqnum = 0; /* A starts with seq num 0, do not change this */
   windowfirst = 0;
-  windowlast = -1;
+  windowlast = -1; /* windowlast is where the last packet sent is stored.
+       new packets are placed in winlast + 1
+       so initially this is set to -1
+     */
   windowcount = 0;
-
-  int i;
-  for (i = 0; i < SEQSPACE; i++)
-  {
-    acked[i] = 0;
-  }
 }
 
 /********* Receiver (B)  variables and procedures ************/
@@ -223,89 +210,66 @@ void B_input(struct pkt packet)
   struct pkt sendpkt;
   int i;
 
-  /* if packet is not corrupted */
-  if (!IsCorrupted(packet))
+  /* if not corrupted and received packet is in order */
+  if ((!IsCorrupted(packet)) && (packet.seqnum == expectedseqnum))
   {
     if (TRACE > 0)
-      printf("----B: packet %d received, checking sequence...\n", packet.seqnum);
+      printf("----B: packet %d is correctly received, send ACK!\n", packet.seqnum);
+    packets_received++;
 
-    /* if within receiver window */
-    int seqdiff = (packet.seqnum - expectedseqnum + SEQSPACE) % SEQSPACE;
-    if (seqdiff < WINDOWSIZE)
-    {
-      /* if not already received */
-      if (!received[packet.seqnum])
-      {
-        if (TRACE > 0)
-          printf("----B: packet %d is buffered and ACK sent\n", packet.seqnum);
-        packets_received++;
+    /* deliver to receiving application */
+    tolayer5(B, packet.payload);
 
-        /* buffer packet */
-        receiver_buffer[packet.seqnum] = packet;
-        received[packet.seqnum] = true;
-      }
+    /* send an ACK for the received packet */
+    sendpkt.acknum = expectedseqnum;
 
-      /* send ACK for the packet */
-      sendpkt.acknum = packet.seqnum;
-    }
-    else
-    {
-      /* out of window, ignore but ACK last in-order */
-      if (TRACE > 0)
-        printf("----B: packet %d outside receiver window, ignored but ACK resent\n", packet.seqnum);
-
-      /* ACK last in-order received packet */
-      if (expectedseqnum == 0)
-        sendpkt.acknum = SEQSPACE - 1;
-      else
-        sendpkt.acknum = expectedseqnum - 1;
-    }
+    /* update state variables */
+    expectedseqnum = (expectedseqnum + 1) % SEQSPACE;
   }
   else
   {
-    /* packet is corrupted, resend last ACK */
+    /* packet is corrupted or out of order resend last ACK */
     if (TRACE > 0)
-      printf("----B: corrupted packet received, resend last ACK\n");
-
+      printf("----B: packet corrupted or not expected sequence number, resend ACK!\n");
     if (expectedseqnum == 0)
       sendpkt.acknum = SEQSPACE - 1;
     else
       sendpkt.acknum = expectedseqnum - 1;
   }
 
-  /* deliver all in-order packets to application layer */
-  while (received[expectedseqnum])
-  {
-    tolayer5(B, receiver_buffer[expectedseqnum].payload);
-    received[expectedseqnum] = false;
-    expectedseqnum = (expectedseqnum + 1) % SEQSPACE;
-  }
-
-  /* create ACK packet */
+  /* create packet */
   sendpkt.seqnum = B_nextseqnum;
   B_nextseqnum = (B_nextseqnum + 1) % 2;
 
+  /* we don't have any data to send.  fill payload with 0's */
   for (i = 0; i < 20; i++)
     sendpkt.payload[i] = '0';
 
+  /* computer checksum */
   sendpkt.checksum = ComputeChecksum(sendpkt);
+
+  /* send out packet */
   tolayer3(B, sendpkt);
 }
+
 /* the following routine will be called once (only) before any other */
 /* entity B routines are called. You can use it to do any initialization */
 void B_init(void)
 {
   expectedseqnum = 0;
   B_nextseqnum = 1;
-
-  int i;
-  for (i = 0; i < WINDOWSIZE; i++)
-  {
-    received[i] = 0;
-  }
 }
-/* not used for unidirectional transfer but required by emulator */
-void B_output(struct msg message) {}
 
-/* not used for SR as B doesn't send data or run timers */
-void B_timerinterrupt(void) {}
+/******************************************************************************
+ * The following functions need be completed only for bi-directional messages *
+ *****************************************************************************/
+
+/* Note that with simplex transfer from a-to-B, there is no B_output() */
+void B_output(struct msg message)
+{
+}
+
+/* called when B's timer goes off */
+void B_timerinterrupt(void)
+{
+}
