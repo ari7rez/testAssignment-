@@ -110,7 +110,7 @@ void A_input(struct pkt packet)
       printf("----A: uncorrupted ACK %d is received\n", packet.acknum);
     total_ACKs_received++;
 
-    /* find ACK in buffer */
+    // find ACK in buffer
     for (int i = 0; i < windowcount; i++)
     {
       int idx = (windowfirst + i) % WINDOWSIZE;
@@ -123,7 +123,7 @@ void A_input(struct pkt packet)
           new_ACKs++;
           acked[idx] = true;
 
-          // Slide window over contiguous ACKs and restart timer
+          // ✅ Always slide over contiguous ACKs
           stoptimer(A);
           while (windowcount > 0 && acked[windowfirst])
           {
@@ -194,6 +194,15 @@ void B_input(struct pkt packet)
   {
     if (TRACE > 0)
       printf("----B: packet corrupted or not expected sequence number, resend ACK!\n");
+
+    // Send duplicate ACK for last correctly received packet
+    sendpkt.seqnum = B_nextseqnum;
+    B_nextseqnum = (B_nextseqnum + 1) % SEQSPACE;
+    sendpkt.acknum = (expectedseqnum - 1 + SEQSPACE) % SEQSPACE;
+    for (int i = 0; i < 20; i++)
+      sendpkt.payload[i] = '0';
+    sendpkt.checksum = ComputeChecksum(sendpkt);
+    tolayer3(B, sendpkt);
     return; // Drop corrupted or invalid packet silently — do NOT ACK
   }
 
