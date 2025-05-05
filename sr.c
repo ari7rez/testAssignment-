@@ -196,7 +196,7 @@ void A_timerinterrupt(void)
 
   if (resend_count[base] >= MAX_RETRIES)
   {
-    printf("----A: Packet %d reached max retries. Giving up.\n", base);
+
     exit(1); // Or return or log error
   }
   tolayer3(A, sender_buffer[buffer_index]);
