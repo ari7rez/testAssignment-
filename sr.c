@@ -32,6 +32,8 @@
                          This implementation uses the provided constants but may exhibit issues
                          in test cases that expose sequence number wrap-around ambiguity. */
 #define NOTINUSE (-1) /* used to fill header fields that are not being used */
+#define MAX_RETRIES 10
+static int resend_count[SEQSPACE]; // retry count per seqnum
 
 /* generic procedure to compute the checksum of a packet.  Used by both sender and receiver
    the simulator will overwrite part of your packet with 'z's.  It will not overwrite your
@@ -142,6 +144,7 @@ void A_input(struct pkt packet)
           printf("----A: Received new ACK for packet %d\n", acked_seqnum);
         acked[buffer_index] = true; // Mark this packet as acknowledged
         // new_ACKs++; // Assuming this counter is for new ACKs
+        resend_count[acked_seqnum] = 0; // Reset retry count when ACKed
       }
       else
       {
@@ -150,7 +153,7 @@ void A_input(struct pkt packet)
       }
 
       // Slide the window forward as much as possible past consecutive acknowledged packets starting from 'base'
-      while ((base - next_seqnum + SEQSPACE) % SEQSPACE < WINDOWSIZE && acked[base % WINDOWSIZE])
+      while (acked[base % WINDOWSIZE])
       {
         if (TRACE > 1)
           printf("----A: Packet %d acknowledged, sliding window base\n", base);
@@ -191,11 +194,16 @@ void A_timerinterrupt(void)
   if (TRACE > 0)
     printf("---A: resending packet %d\n", sender_buffer[buffer_index].seqnum);
 
+  if (resend_count[base] >= MAX_RETRIES)
+  {
+    printf("----A: Packet %d reached max retries. Giving up.\n", base);
+    exit(1); // Or return or log error
+  }
   tolayer3(A, sender_buffer[buffer_index]);
-  packets_resent++; // Assuming this counter is for any resent packet
-
-  // Restart the timer for the packet at the window base
+  packets_resent++;
+  resend_count[base]++;
   starttimer(A, RTT);
+  ;
 }
 
 /* the following routine will be called once (only) before any other */
