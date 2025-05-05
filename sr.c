@@ -123,19 +123,16 @@ void A_input(struct pkt packet)
           new_ACKs++;
           acked[idx] = true;
 
-          /* if it was the oldest, slide window over any contiguous acked */
-          if (i == 0)
+          // Slide window over contiguous ACKs and restart timer
+          stoptimer(A);
+          while (windowcount > 0 && acked[windowfirst])
           {
-            stoptimer(A);
-            while (windowcount > 0 && acked[windowfirst])
-            {
-              acked[windowfirst] = false;
-              windowfirst = (windowfirst + 1) % WINDOWSIZE;
-              windowcount--;
-            }
-            if (windowcount > 0)
-              starttimer(A, RTT);
+            acked[windowfirst] = false;
+            windowfirst = (windowfirst + 1) % WINDOWSIZE;
+            windowcount--;
           }
+          if (windowcount > 0)
+            starttimer(A, RTT);
         }
         else
         {
@@ -155,15 +152,20 @@ void A_input(struct pkt packet)
 void A_timerinterrupt(void)
 {
   if (TRACE > 0)
-    printf("----A: time out,resend packets!\n");
+    printf("----A: time out, resend all unACKed packets in buffer\n");
 
-  /* resend only the oldest unACKed packet */
-  struct pkt p = buffer[windowfirst];
-  if (TRACE > 0)
-    printf("---A: resending packet %d\n", p.seqnum);
-  tolayer3(A, p);
-  packets_resent++;
-  starttimer(A, RTT);
+  for (int i = 0; i < windowcount; i++)
+  {
+    int idx = (windowfirst + i) % WINDOWSIZE;
+    if (!acked[idx])
+    {
+      printf("---A: resending packet %d\n", buffer[idx].seqnum);
+      tolayer3(A, buffer[idx]);
+      packets_resent++;
+    }
+  }
+
+  starttimer(A, RTT); // Always restart timer
 }
 
 /********* Receiver (B) variables and procedures ************/
@@ -186,35 +188,33 @@ void B_input(struct pkt packet)
   int seq = packet.seqnum;
   int diff = (seq - expectedseqnum + SEQSPACE) % SEQSPACE;
   bool inWindow = (diff < WINDOWSIZE);
+  bool newPkt = false;
 
-  if (!IsCorrupted(packet) && inWindow)
+  if (IsCorrupted(packet) || !inWindow)
   {
-    if (!rcvd[seq % WINDOWSIZE])
+    if (TRACE > 0)
+      printf("----B: packet corrupted or not expected sequence number, resend ACK!\n");
+    return; // Drop corrupted or invalid packet silently — do NOT ACK
+  }
+
+  if (!rcvd[seq % WINDOWSIZE])
+  {
+    if (TRACE > 0)
     {
       if (diff == 0)
-      {
-        if (TRACE > 0)
-          printf("----B: packet %d is correctly received, send ACK!\n", seq);
-        packets_received++;
-      }
+        printf("----B: packet %d is correctly received, send ACK!\n", seq);
       else
-      {
-        if (TRACE > 0)
-          printf("----B: packet %d correctly received but out of order, buffered!\n", seq);
-      }
-      rbuffer[seq % WINDOWSIZE] = packet;
-      rcvd[seq % WINDOWSIZE] = true;
+        printf("----B: packet %d correctly received but out of order, buffered!\n", seq);
     }
-    else
-    {
-      if (TRACE > 0)
-        printf("----B: duplicate packet %d, already buffered, resend ACK!\n", seq);
-    }
+    packets_received++;
+    rbuffer[seq % WINDOWSIZE] = packet;
+    rcvd[seq % WINDOWSIZE] = true;
+    newPkt = true;
   }
   else
   {
     if (TRACE > 0)
-      printf("----B: packet corrupted or not expected sequence number, resend ACK!\n");
+      printf("----B: duplicate packet %d, already buffered, resend ACK!\n", seq);
   }
 
   /* send ACK for whatever seq we got */
@@ -226,15 +226,17 @@ void B_input(struct pkt packet)
   sendpkt.checksum = ComputeChecksum(sendpkt);
   tolayer3(B, sendpkt);
 
-  /* deliver any in-order packets starting from expectedseqnum */
-  while (rcvd[expectedseqnum % WINDOWSIZE])
+  /* deliver in-order packets only when we received a new one */
+  if (newPkt)
   {
-    tolayer5(B, rbuffer[expectedseqnum % WINDOWSIZE].payload);
-    rcvd[expectedseqnum % WINDOWSIZE] = false;
-    expectedseqnum = (expectedseqnum + 1) % SEQSPACE;
+    while (rcvd[expectedseqnum % WINDOWSIZE])
+    {
+      tolayer5(B, rbuffer[expectedseqnum % WINDOWSIZE].payload);
+      rcvd[expectedseqnum % WINDOWSIZE] = false;
+      expectedseqnum = (expectedseqnum + 1) % SEQSPACE;
+    }
   }
 }
-
 /******************************************************************************
  * The following functions need be completed only for bi-directional messages *
  *****************************************************************************/
